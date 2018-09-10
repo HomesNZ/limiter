@@ -62,25 +62,25 @@ func NewStoreWithOptions(client Client, options limiter.StoreOptions) (limiter.S
 }
 
 // Get returns the limit for given identifier.
-func (store *Store) Get(ctx context.Context, key string, rate limiter.Rate) (limiter.Context, error) {
+func (store *Store) GetVal(ctx context.Context, key string, rate limiter.Rate, val int64) (limiter.Context, error) {
 	key = fmt.Sprintf("%s:%s", store.Prefix, key)
 	now := time.Now()
 
 	lctx := limiter.Context{}
 	onWatch := func(rtx *libredis.Tx) error {
 
-		created, err := store.doSetValue(rtx, key, rate.Period)
+		created, err := store.doSetValue(rtx, key, rate.Period, val)
 		if err != nil {
 			return err
 		}
 
 		if created {
 			expiration := now.Add(rate.Period)
-			lctx = common.GetContextFromState(now, rate, expiration, 1)
+			lctx = common.GetContextFromState(now, rate, expiration, val)
 			return nil
 		}
 
-		count, ttl, err := store.doUpdateValue(rtx, key, rate.Period)
+		count, ttl, err := store.doUpdateValue(rtx, key, rate.Period, val)
 		if err != nil {
 			return err
 		}
@@ -101,6 +101,11 @@ func (store *Store) Get(ctx context.Context, key string, rate limiter.Rate) (lim
 	}
 
 	return lctx, nil
+}
+
+// Get returns the limit for given identifier.
+func (store *Store) Get(ctx context.Context, key string, rate limiter.Rate) (limiter.Context, error) {
+	return store.GetVal(ctx, key, rate, 1)
 }
 
 // Peek returns the limit for given identifier, without modification on current values.
@@ -169,9 +174,9 @@ func peekValue(rtx *libredis.Tx, key string) (int64, time.Duration, error) {
 }
 
 // doSetValue will execute setValue with a retry mecanism (optimistic locking) until store.MaxRetry is reached.
-func (store *Store) doSetValue(rtx *libredis.Tx, key string, expiration time.Duration) (bool, error) {
+func (store *Store) doSetValue(rtx *libredis.Tx, key string, expiration time.Duration, val int64) (bool, error) {
 	for i := 0; i < store.MaxRetry; i++ {
-		created, err := setValue(rtx, key, expiration)
+		created, err := setValue(rtx, key, expiration, val)
 		if err == nil {
 			return created, nil
 		}
@@ -180,8 +185,8 @@ func (store *Store) doSetValue(rtx *libredis.Tx, key string, expiration time.Dur
 }
 
 // setValue will try to initialize a new counter if given key doesn't exists.
-func setValue(rtx *libredis.Tx, key string, expiration time.Duration) (bool, error) {
-	value := rtx.SetNX(key, 1, expiration)
+func setValue(rtx *libredis.Tx, key string, expiration time.Duration, val int64) (bool, error) {
+	value := rtx.SetNX(key, val, expiration)
 
 	created, err := value.Result()
 	if err != nil {
@@ -193,9 +198,9 @@ func setValue(rtx *libredis.Tx, key string, expiration time.Duration) (bool, err
 
 // doUpdateValue will execute setValue with a retry mecanism (optimistic locking) until store.MaxRetry is reached.
 func (store *Store) doUpdateValue(rtx *libredis.Tx, key string,
-	expiration time.Duration) (int64, time.Duration, error) {
+	expiration time.Duration, val int64) (int64, time.Duration, error) {
 	for i := 0; i < store.MaxRetry; i++ {
-		count, ttl, err := updateValue(rtx, key, expiration)
+		count, ttl, err := updateValue(rtx, key, expiration, val)
 		if err == nil {
 			return count, ttl, nil
 		}
@@ -209,9 +214,9 @@ func (store *Store) doUpdateValue(rtx *libredis.Tx, key string,
 }
 
 // updateValue will try to increment the counter identified by given key.
-func updateValue(rtx *libredis.Tx, key string, expiration time.Duration) (int64, time.Duration, error) {
+func updateValue(rtx *libredis.Tx, key string, expiration time.Duration, val int64) (int64, time.Duration, error) {
 	pipe := rtx.Pipeline()
-	value := pipe.Incr(key)
+	value := pipe.IncrBy(key, val)
 	expire := pipe.PTTL(key)
 
 	_, err := pipe.Exec()
